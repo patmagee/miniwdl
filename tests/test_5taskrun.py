@@ -1,4 +1,5 @@
 import unittest
+import logging
 from .context import WDL
 
 class TestTaskRunner(unittest.TestCase):
@@ -19,5 +20,7 @@ class TestTaskRunner(unittest.TestCase):
 
         doc = WDL.parse_document(wdl)
         doc.typecheck()
+
+        logging.basicConfig(level=logging.DEBUG, format='%(name)s %(levelname)s %(message)s')
         WDL.runner.run_local_task(doc.tasks[0], [])
 

@@ -48,20 +48,21 @@ Orrrr we could expose our own wait & timeout...pros&cons there.
 # Terminated
 # OutputError
 
+
 class CommandError(WDL.Error.RuntimeError):
     pass
+
 
 class Terminated(WDL.Error.RuntimeError):
     pass
 
 
-
 class TaskContainer(ABC):
-    task_id : str
-    host_dir : str
-    container_dir : str
-    input_file_map : Dict[str,str]
-    _terminate : bool
+    task_id: str
+    host_dir: str
+    container_dir: str
+    input_file_map: Dict[str, str]
+    _terminate: bool
 
     def __init__(self, task_id: str, host_dir: str) -> None:
         self.task_id = task_id
@@ -82,7 +83,7 @@ class TaskContainer(ABC):
         # Error out if any input filenames collide.
         # TODO: assort them into separate subdirectories, also with a heuristic
         # grouping together files that come from the same host directory
-        collisions = [bn for bn, ct in basenames.items() if ct>1]
+        collisions = [bn for bn, ct in basenames.items() if ct > 1]
         if collisions:
             raise WDL.Error.InputError("input filename collision(s): " + " ".join(collisions))
 
@@ -108,8 +109,9 @@ class TaskContainer(ABC):
     def _run(self, logger: logging.Logger, command: str) -> None:
         raise NotImplementedError()
 
+
 class TaskDockerContainer(TaskContainer):
-    image_tag : str
+    image_tag: str
 
     def __init__(self, task_id: str, host_dir: str) -> None:
         super().__init__(task_id, host_dir)
@@ -126,12 +128,21 @@ class TaskDockerContainer(TaskContainer):
         volumes = {}
         # mount input files and command read-only
         for host_path, container_path in self.input_file_map.items():
-            volumes[host_path] = { "bind": container_path, "mode": "ro" }
-        volumes[os.path.join(self.host_dir, "command")] = { "bind": os.path.join(self.container_dir, "command"), "mode": "ro" }
+            volumes[host_path] = {"bind": container_path, "mode": "ro"}
+        volumes[os.path.join(self.host_dir, "command")] = {
+            "bind": os.path.join(self.container_dir, "command"),
+            "mode": "ro",
+        }
         # mount stdout, stderr, and working directory read/write
         for pipe_file in pipe_files:
-            volumes[os.path.join(self.host_dir, pipe_file)] = { "bind": os.path.join(self.container_dir, pipe_file), "mode": "rw" }
-        volumes[os.path.join(self.host_dir, "work")] = { "bind": os.path.join(self.container_dir, "work"), "mode": "rw" }
+            volumes[os.path.join(self.host_dir, pipe_file)] = {
+                "bind": os.path.join(self.container_dir, pipe_file),
+                "mode": "rw",
+            }
+        volumes[os.path.join(self.host_dir, "work")] = {
+            "bind": os.path.join(self.container_dir, "work"),
+            "mode": "rw",
+        }
         logger.debug("docker volume map: " + str(volumes))
 
         client = docker.from_env()
@@ -141,15 +152,18 @@ class TaskDockerContainer(TaskContainer):
 
             try:
                 logger.info("docker starting image {}".format(self.image_tag))
-                container = client.containers.run(self.image_tag,
-                    command = ["bash", "-c", "bash ../command >> ../stdout.txt 2>> ../stderr.txt"],
-                    detach = True,
-                    auto_remove = True,
-                    working_dir = os.path.join(self.container_dir, "work"),
-                    volumes = volumes,
+                container = client.containers.run(
+                    self.image_tag,
+                    command=["bash", "-c", "bash ../command >> ../stdout.txt 2>> ../stderr.txt"],
+                    detach=True,
+                    auto_remove=True,
+                    working_dir=os.path.join(self.container_dir, "work"),
+                    volumes=volumes,
                 )
-                logger.debug("docker container name = {}, id = {}".format(container.name, container.id))
-                
+                logger.debug(
+                    "docker container name = {}, id = {}".format(container.name, container.id)
+                )
+
                 while exit_info is None:
                     try:
                         exit_info = container.wait(timeout=1)
@@ -164,20 +178,28 @@ class TaskDockerContainer(TaskContainer):
                         container.remove(force=True)
                     except Exception as exn:
                         logger.critical("failed to remove docker container: " + str(exn))
-                        pass
                 raise
 
+            assert exit_info
             if "StatusCode" not in exit_info:
-                raise CommandError("docker finished without reporting exit status in: " + str(exit_info))
+                raise CommandError(
+                    "docker finished without reporting exit status in: " + str(exit_info)
+                )
             if exit_info["StatusCode"] != 0:
-                raise CommandError("command exit status = " + str(exit_code))
+                raise CommandError("command exit status = " + str(exit_info["StatusCode"]))
         finally:
             try:
                 client.close()
             except:
                 logger.critical("failed to close docker-py client")
 
-def run_local_task(task: WDL.Task, posix_inputs: WDL.Env.Values, task_id: Optional[str] = None, parent_dir: Optional[str] = None) -> Tuple[str,WDL.Env.Values]:
+
+def run_local_task(
+    task: WDL.Task,
+    posix_inputs: WDL.Env.Values,
+    task_id: Optional[str] = None,
+    parent_dir: Optional[str] = None,
+) -> Tuple[str, WDL.Env.Values]:
     """
     Execute a task locally.
 
@@ -204,7 +226,7 @@ def run_local_task(task: WDL.Task, posix_inputs: WDL.Env.Values, task_id: Option
             os.makedirs(run_dir, exist_ok=False)
 
     # provision logger
-    logger = logging.getLogger(task_id)
+    logger = logging.getLogger("miniwdl_task:" + task_id)
     logger.info("starting task")
     logger.debug("task run directory " + run_dir)
 
@@ -224,13 +246,13 @@ def run_local_task(task: WDL.Task, posix_inputs: WDL.Env.Values, task_id: Option
         if isinstance(image_tag_expr, str):
             container.image_tag = image_tag_expr
         elif isinstance(image_tag_expr, WDL.Expr.Base):
-            container.image_tag = image_tag_expr.eval(posix_inputs)
+            container.image_tag = image_tag_expr.eval(posix_inputs).value
         else:
             assert False
 
     # interpolate command
     command = _strip_leading_whitespace(task.command.eval(posix_inputs).value)[1]
-    
+
     # run container
     container.run(logger, command)
 
@@ -241,7 +263,7 @@ def run_local_task(task: WDL.Task, posix_inputs: WDL.Env.Values, task_id: Option
     return (run_dir, [])
 
 
-def _strip_leading_whitespace(txt):
+def _strip_leading_whitespace(txt: str) -> Tuple[int, str]:
     lines = txt.split("\n")
 
     to_strip = None
