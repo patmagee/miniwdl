@@ -5,6 +5,7 @@ import inspect
 from typing import List, Optional, Callable
 from WDL import _parser, Error, Type, Value, Env, Expr, Tree, Walker, StdLib
 from WDL.Tree import Decl, StructTypeDef, Task, Call, Scatter, Conditional, Workflow, Document
+import WDL.runner
 
 SourcePosition = Error.SourcePosition
 SourceNode = Error.SourceNode
