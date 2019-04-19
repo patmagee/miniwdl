@@ -2,11 +2,13 @@
 import logging
 import os
 import tempfile
+import json
+import copy
 import docker
 from datetime import datetime
 from requests.exceptions import ReadTimeout
 from abc import ABC, abstractmethod
-from typing import NamedTuple, Tuple, List, Dict, Optional
+from typing import NamedTuple, Tuple, List, Dict, Optional, Iterable
 import WDL
 
 """
@@ -82,7 +84,8 @@ class TaskContainer(ABC):
 
         # Error out if any input filenames collide.
         # TODO: assort them into separate subdirectories, also with a heuristic
-        # grouping together files that come from the same host directory
+        # grouping together files that come from the same host directory.
+        # Don't flip out if the same file is passed for more than one input though.
         collisions = [bn for bn, ct in basenames.items() if ct > 1]
         if collisions:
             raise WDL.Error.InputError("input filename collision(s): " + " ".join(collisions))
@@ -145,12 +148,14 @@ class TaskDockerContainer(TaskContainer):
         }
         logger.debug("docker volume map: " + str(volumes))
 
+        # connect to dockerd
         client = docker.from_env()
         try:
             container = None
             exit_info = None
 
             try:
+                # run container
                 logger.info("docker starting image {}".format(self.image_tag))
                 container = client.containers.run(
                     self.image_tag,
@@ -168,6 +173,7 @@ class TaskDockerContainer(TaskContainer):
                     "docker container name = {}, id = {}".format(container.name, container.id)
                 )
 
+                # long-poll for container exit
                 while exit_info is None:
                     try:
                         exit_info = container.wait(timeout=1)
@@ -175,19 +181,24 @@ class TaskDockerContainer(TaskContainer):
                         # TODO: tail stderr.txt into logger
                         if self._terminate:
                             raise Terminated() from None
-                        # workaround for docker-py not throwing the "right" exception class
+                        # workaround for docker-py not throwing the exception class
+                        # it's supposed to
                         s_exn = str(exn)
                         if "Read timed out" not in s_exn and "Timeout" not in s_exn:
                             raise
                 logger.info("container exit info = " + str(exit_info))
             except:
+                # make sure to stop & clean up the container if we're stopping due
+                # to SIGTERM or something. Most other cases should be handled by
+                # auto_remove.
                 if container:
                     try:
                         container.remove(force=True)
                     except Exception as exn:
-                        logger.critical("failed to remove docker container: " + str(exn))
+                        logger.error("failed to remove docker container: " + str(exn))
                 raise
 
+            # retrieve and check container exit status
             assert exit_info
             if "StatusCode" not in exit_info:
                 raise CommandError(
@@ -199,7 +210,7 @@ class TaskDockerContainer(TaskContainer):
             try:
                 client.close()
             except:
-                logger.critical("failed to close docker-py client")
+                logger.error("failed to close docker-py client")
 
 
 def run_local_task(
@@ -241,14 +252,11 @@ def run_local_task(
     # create appropriate TaskContainer
     container = TaskDockerContainer(task_id, run_dir)
 
-    # map input Files to in-container paths
-    # evaluate pre-command declaration DAG
-    # - File-to-String coercions will yield in-container paths
-    # - Invocations of size(), read_* are permitted only on File inputs (no String coercions pls)
-    # - Invocations of write_* will add something to the mapping
-    # - glob is forbidden/undefined
-    # evaluate runtime.docker
+    # evaluate input/postinput declarations, including mapping from host to
+    # in-container file paths
+    container_env = _eval_task_inputs(logger, task, posix_inputs, container)
 
+    # evaluate runtime.docker
     image_tag_expr = task.runtime.get("docker", None)
     if image_tag_expr:
         if isinstance(image_tag_expr, str):
@@ -259,7 +267,7 @@ def run_local_task(
             assert False
 
     # interpolate command
-    command = _strip_leading_whitespace(task.command.eval(posix_inputs).value)[1]
+    command = _strip_leading_whitespace(task.command.eval(container_env).value)[1]
 
     # run container
     container.run(logger, command)
@@ -270,6 +278,76 @@ def run_local_task(
 
     logging.info("done")
     return (run_dir, [])
+
+
+def _eval_task_inputs(
+    logger: logging.Logger, task: WDL.Task, posix_inputs: WDL.Env.Values, container: TaskContainer
+) -> WDL.Env.Values:
+    # Map all the provided input Files to in-container paths
+    # First make a pass to collect all the host paths and pass them to the
+    # container as a group (so that it can deal with any basename collisions)
+    host_files = []
+
+    def collect_host_files(v: WDL.Value.Base) -> None:
+        if isinstance(v, WDL.Value.File):
+            host_files.append(v.value)
+        for ch in v.children:
+            collect_host_files(ch)
+
+    WDL.Env.map(posix_inputs, lambda namespace, binding: collect_host_files(binding.rhs))
+    container.add_files(host_files)
+
+    # copy posix_inputs with all Files mapped to their in-container paths
+    def map_files(v: WDL.Value.Base) -> WDL.Value.Base:
+        if isinstance(v, WDL.Value.File):
+            v.value = container.input_file_map[v.value]
+        for ch in v.children:
+            map_files(ch)
+        return v
+
+    container_inputs = WDL.Env.map(
+        posix_inputs, lambda namespace, binding: map_files(copy.deepcopy(binding.rhs))
+    )
+
+    # Collect task declarations requiring evaluation. This includes input
+    # declarations that are optional and/or have default values, and are not
+    # explicitly provided by posix_inputs; and all post-input declarations.
+    decls_to_eval = {}
+    for inp in task.available_inputs:
+        assert isinstance(inp, WDL.Env.Binding)
+        try:
+            WDL.Env.resolve(container_inputs, [], inp.name)
+        except KeyError:
+            decls_to_eval[inp.name] = inp.rhs
+    for inp in task.postinputs:
+        assert isinstance(inp, WDL.Env.Binding)
+        try:
+            WDL.Env.resolve(container_inputs, [], inp.name)
+            assert False
+        except KeyError:
+            pass
+        decls_to_eval[inp.name] = inp.rhs
+
+    # TODO: topsort decls_to_eval according to internal dependencies
+
+    container_env = container_inputs
+    for b in container_env:
+        assert isinstance(b, WDL.Env.Binding)
+        logger.info("input {} -> {}".format(b.name, json.dumps(b.rhs.json)))
+
+    # evaluate each declaration in order
+    # TODO: stdlib speccializations:
+    # - Invocations of size(), read_* are permitted only on File inputs (no String coercions pls)
+    # - Invocations of write_* will add something to the mapping
+    # - forbidden/undefined: stdout, stderr, glob
+    for decl in decls_to_eval.values():
+        v = WDL.Value.Null()
+        if decl.expr:
+            v = decl.expr.eval(container_env)
+        logger.info("eval {} -> {}".format(decl.name, json.dumps(v.json)))
+        container_env = WDL.Env.bind(container_env, [], decl.name, v)
+
+    return container_env
 
 
 def _strip_leading_whitespace(txt: str) -> Tuple[int, str]:
