@@ -154,7 +154,11 @@ class TaskDockerContainer(TaskContainer):
                 logger.info("docker starting image {}".format(self.image_tag))
                 container = client.containers.run(
                     self.image_tag,
-                    command=["bash", "-c", "bash ../command >> ../stdout.txt 2>> ../stderr.txt"],
+                    command=[
+                        "/bin/bash",
+                        "-c",
+                        "/bin/bash ../command >> ../stdout.txt 2>> ../stderr.txt",
+                    ],
                     detach=True,
                     auto_remove=True,
                     working_dir=os.path.join(self.container_dir, "work"),
@@ -167,10 +171,14 @@ class TaskDockerContainer(TaskContainer):
                 while exit_info is None:
                     try:
                         exit_info = container.wait(timeout=1)
-                    except ReadTimeout:
+                    except Exception as exn:
                         # TODO: tail stderr.txt into logger
                         if self._terminate:
                             raise Terminated() from None
+                        # workaround for docker-py not throwing the "right" exception class
+                        s_exn = str(exn)
+                        if "Read timed out" not in s_exn and "Timeout" not in s_exn:
+                            raise
                 logger.info("container exit info = " + str(exit_info))
             except:
                 if container:
@@ -260,6 +268,7 @@ def run_local_task(
     # - size(), read_* and glob are permitted only on paths in or under the container directory (cdup from working directory)
     # - they have to be translated from container to host paths
 
+    logging.info("done")
     return (run_dir, [])
 
 
