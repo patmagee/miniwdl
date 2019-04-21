@@ -1,6 +1,7 @@
 import unittest
 import logging
 import tempfile
+import os
 from .context import WDL
 
 class TestTaskRunner(unittest.TestCase):
@@ -17,6 +18,7 @@ class TestTaskRunner(unittest.TestCase):
         rundir, outputs = WDL.runner.run_local_task(doc.tasks[0], (inputs or []), parent_dir=self._dir)
         if expected_outputs is not None:
             self.assertEqual(outputs, expected_outputs)
+        return outputs
 
     def test_basic_docker(self):
         self._test_task(R"""
@@ -53,3 +55,24 @@ class TestTaskRunner(unittest.TestCase):
         }
         """,
         WDL.Env.bind([], [], "who", WDL.Value.String("Alyssa")))
+
+    def test_hello_file(self):
+        with open(os.path.join(self._dir, "alyssa.txt"), "w") as outfile:
+            outfile.write("Alyssa")
+        outputs = self._test_task(R"""
+            version 1.0
+            task hello_file {
+                input {
+                    File who
+                }
+                command <<<
+                    echo -n "Hello, $(cat ~{who})!" > message.txt
+                >>>
+                output {
+                    File message = "message.txt"
+                }
+            }
+            """,
+            WDL.Env.bind([], [], "who", WDL.Value.File(os.path.join(self._dir, "alyssa.txt"))))
+        with open(WDL.Env.resolve(outputs, [], "message").value) as infile:
+            self.assertEqual(infile.read(), "Hello, Alyssa!")

@@ -59,6 +59,10 @@ class Terminated(WDL.Error.RuntimeError):
     pass
 
 
+class OutputError(WDL.Error.RuntimeError):
+    pass
+
+
 class TaskContainer(ABC):
     task_id: str
     host_dir: str
@@ -111,6 +115,14 @@ class TaskContainer(ABC):
     @abstractmethod
     def _run(self, logger: logging.Logger, command: str) -> None:
         raise NotImplementedError()
+
+    def host_file(self, container_file: str) -> str:
+        if os.path.isabs(container_file):
+            dpfx = self.container_dir + "/"
+            if not container_file.startswith(dpfx):
+                raise OutputError("task attempted to output a file outside its working directory")
+            container_file = container_file[len(dpfx) :]
+        return os.path.join(self.host_dir, container_file)
 
 
 class TaskDockerContainer(TaskContainer):
@@ -273,11 +285,10 @@ def run_local_task(
     container.run(logger, command)
 
     # evaluate output declarations
-    # - size(), read_* and glob are permitted only on paths in or under the container directory (cdup from working directory)
-    # - they have to be translated from container to host paths
+    outputs = _eval_task_outputs(logger, task, container_env, container)
 
     logging.info("done")
-    return (run_dir, [])
+    return (run_dir, outputs)
 
 
 def _eval_task_inputs(
@@ -348,6 +359,34 @@ def _eval_task_inputs(
         container_env = WDL.Env.bind(container_env, [], decl.name, v)
 
     return container_env
+
+
+def _eval_task_outputs(
+    logger: logging.Logger, task: WDL.Task, env: WDL.Env.Values, container: TaskContainer
+) -> WDL.Env.Values:
+    # TODO: stdlib specializations,
+    # - size(), read_* and glob are permitted only on paths in or under the container directory (cdup from working directory)
+    # - their argument has to be translated from container to host path to actually execute
+
+    outputs = []
+    for decl in task.outputs:
+        assert decl.expr
+        v = decl.expr.eval(env)
+        logger.info("output {} -> {}".format(decl.name, json.dumps(v.json)))
+        outputs = WDL.Env.bind(outputs, [], decl.name, v)
+
+    # map Files from in-container paths to host paths
+    # TODO: coerce WDL.Value.String to WDL.Value.File when appropriate
+    def map_files(v: WDL.Value.Base) -> WDL.Value.Base:
+        if isinstance(v, WDL.Value.File):
+            host_file = container.host_file(v.value)
+            logger.debug("File {} -> {}".format(v.value, host_file))
+            v.value = host_file
+        for ch in v.children:
+            map_files(ch)
+        return v
+
+    return WDL.Env.map(outputs, lambda namespace, binding: map_files(copy.deepcopy(binding.rhs)))
 
 
 def _strip_leading_whitespace(txt: str) -> Tuple[int, str]:
