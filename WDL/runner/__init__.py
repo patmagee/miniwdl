@@ -64,10 +64,38 @@ class OutputError(WDL.Error.RuntimeError):
 
 
 class TaskContainer(ABC):
+    """
+    Base class for task containers, subclassed by runtime-specific
+    implementations (e.g. Docker).
+    """
+
     task_id: str
+
     host_dir: str
+    """
+    :type: str
+
+    The host path to the scratch directory that will be mounted inside the
+    container.
+    """
+
     container_dir: str
+    """
+    :type: str
+
+    The scratch directory's mounted path inside the container. The task
+    command's working directory will be ``{container_dir}/work/``.
+    """
+
     input_file_map: Dict[str, str]
+    """
+    :type: Dict[str,str]
+
+    A mapping of host input file paths to in-container mounted paths,
+    maintained by ``add_files``.
+    """
+
+    _running: bool
     _terminate: bool
 
     def __init__(self, task_id: str, host_dir: str) -> None:
@@ -75,21 +103,31 @@ class TaskContainer(ABC):
         self.host_dir = host_dir
         self.container_dir = "/mnt/miniwdl_task_run"
         self.input_file_map = {}
+        self._running = False
         self._terminate = False
 
     def add_files(self, host_files: List[str]) -> None:
+        """
+        Use before running the container to add a list of host files to mount
+        inside the container as inputs. The host-to-container path mapping is
+        maintained in ``input_file_map``.
+
+        Although ``add_files`` can be used multiple times, files should be
+        added together where possible, as this allows heuristics for dealing
+        with any name collisions among them.
+        """
+        assert not self._running
         ans = {}
         basenames = {}
         for fn in host_files:
-            bn = os.path.basename(fn)
-            basenames[bn] = 1 + basenames.get(bn, 0)
             if fn not in self.input_file_map:
+                bn = os.path.basename(fn)
+                basenames[bn] = 1 + basenames.get(bn, 0)
                 ans[fn] = os.path.join(self.container_dir, "inputs", bn)
 
         # Error out if any input filenames collide.
         # TODO: assort them into separate subdirectories, also with a heuristic
         # grouping together files that come from the same host directory.
-        # Don't flip out if the same file is passed for more than one input though.
         collisions = [bn for bn, ct in basenames.items() if ct > 1]
         if collisions:
             raise WDL.Error.InputError("input filename collision(s): " + " ".join(collisions))
@@ -108,6 +146,8 @@ class TaskContainer(ABC):
 
         The container is torn down in any case, including SIGTERM/SIGHUP signal which is trapped.
         """
+        assert not self._running
+        self._running = True
         # container-specific logic should be in _run(). this wrapper traps SIGTERM/SIGHUP
         # and sets self._terminate
         return self._run(logger, command)
@@ -117,12 +157,15 @@ class TaskContainer(ABC):
         raise NotImplementedError()
 
     def host_file(self, container_file: str) -> str:
+        """
+        Map an in-container path under ``container_dir`` to a host path.
+        """
         if os.path.isabs(container_file):
-            dpfx = self.container_dir + "/"
+            dpfx = os.path.join(self.container_dir, "work") + "/"
             if not container_file.startswith(dpfx):
                 raise OutputError("task attempted to output a file outside its working directory")
             container_file = container_file[len(dpfx) :]
-        return os.path.join(self.host_dir, container_file)
+        return os.path.join(self.host_dir, "work", container_file)
 
 
 class TaskDockerContainer(TaskContainer):
@@ -371,7 +414,9 @@ def _eval_task_outputs(
     outputs = []
     for decl in task.outputs:
         assert decl.expr
-        v = decl.expr.eval(env)
+        v = WDL.Value.from_json(
+            decl.type, decl.expr.eval(env).json
+        )  # TODO: are we happy with this coercion approach?
         logger.info("output {} -> {}".format(decl.name, json.dumps(v.json)))
         outputs = WDL.Env.bind(outputs, [], decl.name, v)
 
