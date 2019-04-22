@@ -11,44 +11,8 @@ from abc import ABC, abstractmethod
 from typing import NamedTuple, Tuple, List, Dict, Optional, Iterable
 import WDL
 
-"""
-Task lifecycle
-
-Preamble: runtime attributes will have been evaluated and implemented somehow
-
-Load AST and inputs/outputs
-Provision execution working directory, and 'localize' input files
-- Calculate 1:1 mapping for the outside-docker:inside-docker path of each input file
-- Usually project each input file into one directory inside docker
-- If basenames collide, error out for now; in the future we can put one or the other
-  into a temp subdirectory, with a heuristic that any other file with the same path
-  plus suffix is also placed in that subdirectory.
-- Modularize this container logic so one could theoretically implement on Singularity etc.
-
-Evaluate pre-command declaration DAG
-- File-to-String coercions will yield inside-docker paths
-- Invocations of size(), read_* are permitted only on File inputs (no String coercions pls)
-- Invocations of write_* will have something added to the mapping
-- glob is forbidden/undefined?
-Evaluate command interpolations to formulate command script
-Execute script with all necessary instrumentation, manipulating docker-py as needed
-Evaluate output declarations
-Upload output files if necessary (note, files may be embedded inside compound-type outputs)
-Transmit outputs
-
-
-How to handle task termination? https://stackoverflow.com/questions/18499497/how-to-process-sigterm-signal-gracefully
-"docker run" seems to ignore sigterm. if you sigkill it, container stays alive. 
-http://blog.bordage.pro/avoid-docker-py/
-docker-py Container.wait has a timeout. so, we could trap sigint and sigterm and use docker-py to clean up
-Orrrr we could expose our own wait & timeout...pros&cons there.
-"""
-
 
 # InputError
-# CommandError
-# Terminated
-# OutputError
 
 
 class CommandError(WDL.Error.RuntimeError):
@@ -158,22 +122,38 @@ class TaskContainer(ABC):
 
     def host_file(self, container_file: str) -> str:
         """
-        Map an in-container path under ``container_dir`` to a host path.
+        Map an output file's in-container path under ``container_dir`` to a
+        host path.
         """
         if os.path.isabs(container_file):
             dpfx = os.path.join(self.container_dir, "work") + "/"
             if not container_file.startswith(dpfx):
-                raise OutputError("task attempted to output a file outside its working directory")
+                raise OutputError(
+                    "task attempted to output a file outside its working directory: "
+                    + container_file
+                )
             container_file = container_file[len(dpfx) :]
-        return os.path.join(self.host_dir, "work", container_file)
+        if container_file.startswith("..") or "/.." in container_file:
+            raise OutputError(
+                "task output file path must not contain .. uplevels: " + container_file
+            )
+        ans = os.path.join(self.host_dir, "work", container_file)
+        if not os.path.isfile(ans) or os.path.islink(ans):
+            raise OutputError("task output file not found: " + container_file)
+        return ans
 
 
 class TaskDockerContainer(TaskContainer):
-    image_tag: str
+    """
+    TaskContainer docker runtime
+    """
 
-    def __init__(self, task_id: str, host_dir: str) -> None:
-        super().__init__(task_id, host_dir)
-        self.image_tag = "ubuntu:18.04"
+    image_tag: str = "ubuntu:18.04"
+    """
+    :type: str
+
+    docker image tag (set as desired before running)
+    """
 
     def _run(self, logger: logging.Logger, command: str) -> None:
         with open(os.path.join(self.host_dir, "command"), "x") as outfile:
@@ -275,11 +255,11 @@ def run_local_task(
     parent_dir: Optional[str] = None,
 ) -> Tuple[str, WDL.Env.Values]:
     """
-    Execute a task locally.
+    Run a task locally.
 
     Inputs shall have been typechecked already.
 
-    File inputs are presumed to be locally-accessible POSIX file paths that can be mounted into a container
+    File inputs are presumed to be local POSIX file paths that can be mounted into a container
     """
 
     parent_dir = parent_dir or os.getcwd()
@@ -421,7 +401,6 @@ def _eval_task_outputs(
         outputs = WDL.Env.bind(outputs, [], decl.name, v)
 
     # map Files from in-container paths to host paths
-    # TODO: coerce WDL.Value.String to WDL.Value.File when appropriate
     def map_files(v: WDL.Value.Base) -> WDL.Value.Base:
         if isinstance(v, WDL.Value.File):
             host_file = container.host_file(v.value)
