@@ -127,12 +127,20 @@ class TaskContainer(ABC):
         """
         if os.path.isabs(container_file):
             dpfx = os.path.join(self.container_dir, "work") + "/"
-            if not container_file.startswith(dpfx):
-                raise OutputError(
-                    "task attempted to output a file outside its working directory: "
-                    + container_file
-                )
-            container_file = container_file[len(dpfx) :]
+            if container_file.startswith(dpfx):
+                container_file = container_file[len(dpfx) :]
+            else:
+                host_input_files = [
+                    host_input_file
+                    for (host_input_file, container_input_file) in self.input_file_map.items()
+                    if container_input_file == container_file
+                ]
+                if not host_input_files:
+                    raise OutputError(
+                        "task attempted to output a file outside its working directory: "
+                        + container_file
+                    )
+                container_file = host_input_files[0]
         if container_file.startswith("..") or "/.." in container_file:
             raise OutputError(
                 "task output file path must not contain .. uplevels: " + container_file

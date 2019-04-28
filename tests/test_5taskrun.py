@@ -76,3 +76,21 @@ class TestTaskRunner(unittest.TestCase):
             WDL.Env.bind([], [], "who", WDL.Value.File(os.path.join(self._dir, "alyssa.txt"))))
         with open(WDL.Env.resolve(outputs, [], "message").value) as infile:
             self.assertEqual(infile.read(), "Hello, Alyssa!")
+
+        # output an input file
+        outputs = self._test_task(R"""
+            version 1.0
+            task hello_file {
+                input {
+                    File who
+                }
+                command <<<
+                    echo -n "Hello, $(cat ~{who})!"
+                >>>
+                output {
+                    File who2 = who
+                }
+            }
+            """,
+            WDL.Env.bind([], [], "who", WDL.Value.File(os.path.join(self._dir, "alyssa.txt"))))
+        self.assertEqual(WDL.Env.resolve(outputs, [], "who2").value, os.path.join(self._dir, "alyssa.txt"))
