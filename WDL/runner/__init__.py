@@ -126,21 +126,28 @@ class TaskContainer(ABC):
         host path.
         """
         if os.path.isabs(container_file):
+            # handle output of std{out,err}.txt
+            if container_file in [
+                os.path.join(self.container_dir, pipe_file)
+                for pipe_file in ["stdout.txt", "stderr.txt"]
+            ]:
+                return os.path.join(self.host_dir, os.path.basename(container_file))
+            # handle output of an input file
+            host_input_files = [
+                host_input_file
+                for (host_input_file, container_input_file) in self.input_file_map.items()
+                if container_input_file == container_file
+            ]
+            if host_input_files:
+                return host_input_files[0]
+            # otherwise make sure the file is in/under the working directory
             dpfx = os.path.join(self.container_dir, "work") + "/"
-            if container_file.startswith(dpfx):
-                container_file = container_file[len(dpfx) :]
-            else:
-                host_input_files = [
-                    host_input_file
-                    for (host_input_file, container_input_file) in self.input_file_map.items()
-                    if container_input_file == container_file
-                ]
-                if not host_input_files:
-                    raise OutputError(
-                        "task attempted to output a file outside its working directory: "
-                        + container_file
-                    )
-                container_file = host_input_files[0]
+            if not container_file.startswith(dpfx):
+                raise OutputError(
+                    "task attempted to output a file outside its working directory: "
+                    + container_file
+                )
+            container_file = container_file[len(dpfx) :]
         if container_file.startswith("..") or "/.." in container_file:
             raise OutputError(
                 "task output file path must not contain .. uplevels: " + container_file
@@ -148,6 +155,24 @@ class TaskContainer(ABC):
         ans = os.path.join(self.host_dir, "work", container_file)
         if not os.path.isfile(ans) or os.path.islink(ans):
             raise OutputError("task output file not found: " + container_file)
+        return ans
+
+    def stdlib_output(self) -> WDL.StdLib.Base:
+        """
+        Produce a StdLib implementation suitable for evaluation of task output
+        expressions
+        """
+
+        ans = WDL.StdLib.Base()
+        stdout_f = getattr(ans, "stdout", None)
+        assert isinstance(stdout_f, WDL.StdLib.Function)
+        setattr(
+            stdout_f,
+            "F",
+            lambda container_dir=self.container_dir: WDL.Value.File(
+                os.path.join(container_dir, "stdout.txt")
+            ),
+        )
         return ans
 
 
@@ -403,7 +428,7 @@ def _eval_task_outputs(
     for decl in task.outputs:
         assert decl.expr
         v = WDL.Value.from_json(
-            decl.type, decl.expr.eval(env).json
+            decl.type, decl.expr.eval(env, stdlib=container.stdlib_output()).json
         )  # TODO: are we happy with this coercion approach?
         logger.info("output {} -> {}".format(decl.name, json.dumps(v.json)))
         outputs = WDL.Env.bind(outputs, [], decl.name, v)

@@ -5,6 +5,8 @@ import os
 from .context import WDL
 
 class TestTaskRunner(unittest.TestCase):
+    # TODO: determine if we're unable to talk to local dockerd (e.g. inside
+    # travis) and switch to some dummy TaskContainer
 
     def setUp(self):
         logging.basicConfig(level=logging.DEBUG, format='%(name)s %(levelname)s %(message)s')
@@ -94,3 +96,23 @@ class TestTaskRunner(unittest.TestCase):
             """,
             WDL.Env.bind([], [], "who", WDL.Value.File(os.path.join(self._dir, "alyssa.txt"))))
         self.assertEqual(WDL.Env.resolve(outputs, [], "who2").value, os.path.join(self._dir, "alyssa.txt"))
+
+        # stdout()
+        outputs = self._test_task(R"""
+            version 1.0
+            task hello_file {
+                input {
+                    File who
+                }
+                command <<<
+                    echo -n "Hello, $(cat ~{who})!"
+                >>>
+                output {
+                    File message = stdout()
+                }
+            }
+            """,
+            WDL.Env.bind([], [], "who", WDL.Value.File(os.path.join(self._dir, "alyssa.txt"))))
+        self.assertEqual(os.path.basename(WDL.Env.resolve(outputs, [], "message").value), "stdout.txt")
+        with open(WDL.Env.resolve(outputs, [], "message").value) as infile:
+            self.assertEqual(infile.read(), "Hello, Alyssa!")
