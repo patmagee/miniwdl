@@ -34,7 +34,7 @@ class TestTaskRunner(unittest.TestCase):
             }
         }
         """)
-        self.assertTrue("bionic" in WDL.Env.resolve(outputs, [], "issue").value)
+        self.assertTrue("18.04" in WDL.Env.resolve(outputs, [], "issue").value)
 
         outputs = self._test_task(R"""
         version 1.0
@@ -50,7 +50,7 @@ class TestTaskRunner(unittest.TestCase):
             }
         }
         """)
-        self.assertTrue("cosmic" in WDL.Env.resolve(outputs, [], "issue").value)
+        self.assertTrue("18.10" in WDL.Env.resolve(outputs, [], "issue").value)
 
     def test_hello_blank(self):
         self._test_task(R"""
