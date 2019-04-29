@@ -200,16 +200,16 @@ class TaskContainer(ABC):
                 os.path.join(container_dir, "stderr.txt")
             ),
         )
-        def _read_string(container_file: WDL.Value.File, self: "TaskContainer" =self) -> WDL.Value.String:
+
+        def _read_string(
+            container_file: WDL.Value.File, self: "TaskContainer" = self
+        ) -> WDL.Value.String:
             host_file = self.host_file(container_file.value)
             assert host_file.startswith(self.host_dir)
             with open(host_file, "r") as infile:
                 return WDL.Value.String(infile.read())
-        setattr(
-            getattr(ans, "read_string"),
-            "F",
-            _read_string
-        )
+
+        setattr(getattr(ans, "read_string"), "F", _read_string)
         return ans
 
 
