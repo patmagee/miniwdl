@@ -106,7 +106,7 @@ class TaskContainer(ABC):
         2. Command is executed in ``{host_dir}/work/`` (where {host_dir} is mounted to {container_dir} inside the container)
         3. Standard output is written to ``{host_dir}/stdout.txt``
         4. Standard error is written to ``{host_dir}/stderr.txt`` and logged at INFO level
-        5. Raises exception for nonzero exit code or any other error
+        5. Raises CommandError for nonzero exit code, or any other error
 
         The container is torn down in any case, including SIGTERM/SIGHUP signal which is trapped.
         """
@@ -144,17 +144,36 @@ class TaskContainer(ABC):
             dpfx = os.path.join(self.container_dir, "work") + "/"
             if not container_file.startswith(dpfx):
                 raise OutputError(
-                    "task attempted to output a file outside its working directory: "
+                    "task outputs attempted to use a file outside its working directory: "
                     + container_file
                 )
+            # turn it into relative path
             container_file = container_file[len(dpfx) :]
         if container_file.startswith("..") or "/.." in container_file:
             raise OutputError(
-                "task output file path must not contain .. uplevels: " + container_file
+                "task outputs attempted to use file path with .. uplevels: " + container_file
             )
+        # join the relative path to the host working directory
         ans = os.path.join(self.host_dir, "work", container_file)
         if not os.path.isfile(ans) or os.path.islink(ans):
             raise OutputError("task output file not found: " + container_file)
+        return ans
+
+    def _stdlib_base(self) -> WDL.StdLib.Base:
+        # - Invocations of write_* will add something to input_file_map
+        ans = WDL.StdLib.Base()
+        return ans
+
+    def stdlib_input(self) -> WDL.StdLib.Base:
+        """
+        Produce a StdLib implementation suitable for evaluation of task input
+        declarations and command interpolation
+        """
+
+        # - Invocations of size(), read_* are permitted only on (unbound) File inputs
+        # - forbidden/undefined: stdout, stderr, glob
+
+        ans = self._stdlib_base()
         return ans
 
     def stdlib_output(self) -> WDL.StdLib.Base:
@@ -163,15 +182,33 @@ class TaskContainer(ABC):
         expressions
         """
 
-        ans = WDL.StdLib.Base()
-        stdout_f = getattr(ans, "stdout", None)
-        assert isinstance(stdout_f, WDL.StdLib.Function)
+        # - size(), read_* and glob are permitted only on paths in or under the container directory (cdup from working directory)
+        # - their argument has to be translated from container to host path to actually execute
+
+        ans = self._stdlib_base()
         setattr(
-            stdout_f,
+            getattr(ans, "stdout"),
             "F",
             lambda container_dir=self.container_dir: WDL.Value.File(
                 os.path.join(container_dir, "stdout.txt")
             ),
+        )
+        setattr(
+            getattr(ans, "stderr"),
+            "F",
+            lambda container_dir=self.container_dir: WDL.Value.File(
+                os.path.join(container_dir, "stderr.txt")
+            ),
+        )
+        def _read_string(container_file: WDL.Value.File, self: "TaskContainer" =self) -> WDL.Value.String:
+            host_file = self.host_file(container_file.value)
+            assert host_file.startswith(self.host_dir)
+            with open(host_file, "r") as infile:
+                return WDL.Value.String(infile.read())
+        setattr(
+            getattr(ans, "read_string"),
+            "F",
+            _read_string
         )
         return ans
 
@@ -403,10 +440,6 @@ def _eval_task_inputs(
         logger.info("input {} -> {}".format(b.name, json.dumps(b.rhs.json)))
 
     # evaluate each declaration in order
-    # TODO: stdlib speccializations:
-    # - Invocations of size(), read_* are permitted only on File inputs (no String coercions pls)
-    # - Invocations of write_* will add something to the mapping
-    # - forbidden/undefined: stdout, stderr, glob
     for decl in decls_to_eval.values():
         v = WDL.Value.Null()
         if decl.expr:
@@ -420,9 +453,6 @@ def _eval_task_inputs(
 def _eval_task_outputs(
     logger: logging.Logger, task: WDL.Task, env: WDL.Env.Values, container: TaskContainer
 ) -> WDL.Env.Values:
-    # TODO: stdlib specializations,
-    # - size(), read_* and glob are permitted only on paths in or under the container directory (cdup from working directory)
-    # - their argument has to be translated from container to host path to actually execute
 
     outputs = []
     for decl in task.outputs:

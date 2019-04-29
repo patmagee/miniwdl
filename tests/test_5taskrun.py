@@ -23,16 +23,20 @@ class TestTaskRunner(unittest.TestCase):
         return outputs
 
     def test_basic_docker(self):
-        self._test_task(R"""
+        outputs = self._test_task(R"""
         version 1.0
         task hello {
             command <<<
                 cat /etc/issue
             >>>
+            output {
+                String issue = read_string(stdout())
+            }
         }
         """)
+        self.assertTrue("bionic" in WDL.Env.resolve(outputs, [], "issue").value)
 
-        self._test_task(R"""
+        outputs = self._test_task(R"""
         version 1.0
         task hello {
             command <<<
@@ -41,8 +45,12 @@ class TestTaskRunner(unittest.TestCase):
             runtime {
                 docker: "ubuntu:18.10"
             }
+            output {
+                String issue = read_string(stdout())
+            }
         }
         """)
+        self.assertTrue("cosmic" in WDL.Env.resolve(outputs, [], "issue").value)
 
     def test_hello_blank(self):
         self._test_task(R"""
