@@ -2,6 +2,7 @@ import unittest
 import logging
 import tempfile
 import os
+import docker
 from .context import WDL
 
 class TestTaskRunner(unittest.TestCase):
@@ -12,17 +13,23 @@ class TestTaskRunner(unittest.TestCase):
         logging.basicConfig(level=logging.DEBUG, format='%(name)s %(levelname)s %(message)s')
         self._dir = tempfile.mkdtemp(prefix="miniwdl_test_taskrun_")
 
-    def _test_task(self, wdl:str, inputs: WDL.Env.Values = None, expected_outputs: WDL.Env.Values = None):
-        # TODO: expected exceptions
+    def _test_task(self, wdl:str, inputs: WDL.Env.Values = None, expected_outputs: WDL.Env.Values = None, expected_exception: Exception = None):
         doc = WDL.parse_document(wdl)
         assert len(doc.tasks) == 1
         doc.typecheck()
+        if expected_exception:
+            try:
+                WDL.runner.run_local_task(doc.tasks[0], (inputs or []), parent_dir=self._dir)
+            except WDL.runner.TaskFailure as exn:
+                self.assertIsInstance(exn.__context__, expected_exception)
+                return exn.__context__
+            self.assertFalse(str(expected_exception) + " not raised")
         rundir, outputs = WDL.runner.run_local_task(doc.tasks[0], (inputs or []), parent_dir=self._dir)
         if expected_outputs is not None:
             self.assertEqual(outputs, expected_outputs)
         return outputs
 
-    def test_basic_docker(self):
+    def test_docker(self):
         outputs = self._test_task(R"""
         version 1.0
         task hello {
@@ -51,6 +58,18 @@ class TestTaskRunner(unittest.TestCase):
         }
         """)
         self.assertTrue("18.10" in WDL.Env.resolve(outputs, [], "issue").value)
+
+        self._test_task(R"""
+        version 1.0
+        task hello {
+            command <<<
+                cat /etc/issue
+            >>>
+            runtime {
+                docker: "nonexistent:202407"
+            }
+        }
+        """, expected_exception=docker.errors.ImageNotFound)
 
     def test_hello_blank(self):
         self._test_task(R"""
@@ -124,3 +143,14 @@ class TestTaskRunner(unittest.TestCase):
         self.assertEqual(os.path.basename(WDL.Env.resolve(outputs, [], "message").value), "stdout.txt")
         with open(WDL.Env.resolve(outputs, [], "message").value) as infile:
             self.assertEqual(infile.read(), "Hello, Alyssa!")
+
+        # attempt to output an existent but illegal file
+        self._test_task(R"""
+        version 1.0
+        task hello {
+            command {}
+            output {
+                File issue = "/etc/issue"
+            }
+        }
+        """, expected_exception=WDL.runner.OutputError)

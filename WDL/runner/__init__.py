@@ -4,6 +4,7 @@ import os
 import tempfile
 import json
 import copy
+import traceback
 import docker
 from datetime import datetime
 from requests.exceptions import ReadTimeout
@@ -13,7 +14,6 @@ import WDL
 
 
 # InputError
-
 
 class CommandError(WDL.Error.RuntimeError):
     pass
@@ -25,6 +25,16 @@ class Terminated(WDL.Error.RuntimeError):
 
 class OutputError(WDL.Error.RuntimeError):
     pass
+
+
+class TaskFailure(WDL.Error.RuntimeError):
+    task_name : str
+    task_id : str
+
+    def __init__(self, task_name: str, task_id: str) -> None:
+        super().__init__("task {} ({}) failed".format(task_name, task_id))
+        self.task_name = task_name
+        self.task_id = task_id
 
 
 class TaskContainer(ABC):
@@ -354,34 +364,40 @@ def run_local_task(
     logger.info("starting task")
     logger.debug("task run directory " + run_dir)
 
-    # create appropriate TaskContainer
-    container = TaskDockerContainer(task_id, run_dir)
+    try:
+        # create appropriate TaskContainer
+        container = TaskDockerContainer(task_id, run_dir)
 
-    # evaluate input/postinput declarations, including mapping from host to
-    # in-container file paths
-    container_env = _eval_task_inputs(logger, task, posix_inputs, container)
+        # evaluate input/postinput declarations, including mapping from host to
+        # in-container file paths
+        container_env = _eval_task_inputs(logger, task, posix_inputs, container)
 
-    # evaluate runtime.docker
-    image_tag_expr = task.runtime.get("docker", None)
-    if image_tag_expr:
-        if isinstance(image_tag_expr, str):
-            container.image_tag = image_tag_expr
-        elif isinstance(image_tag_expr, WDL.Expr.Base):
-            container.image_tag = image_tag_expr.eval(posix_inputs).value
-        else:
-            assert False
+        # evaluate runtime.docker
+        image_tag_expr = task.runtime.get("docker", None)
+        if image_tag_expr:
+            if isinstance(image_tag_expr, str):
+                container.image_tag = image_tag_expr
+            elif isinstance(image_tag_expr, WDL.Expr.Base):
+                container.image_tag = image_tag_expr.eval(posix_inputs).value
+            else:
+                assert False
 
-    # interpolate command
-    command = _strip_leading_whitespace(task.command.eval(container_env).value)[1]
+        # interpolate command
+        command = _strip_leading_whitespace(task.command.eval(container_env).value)[1]
 
-    # run container
-    container.run(logger, command)
+        # run container
+        container.run(logger, command)
 
-    # evaluate output declarations
-    outputs = _eval_task_outputs(logger, task, container_env, container)
+        # evaluate output declarations
+        outputs = _eval_task_outputs(logger, task, container_env, container)
 
-    logging.info("done")
-    return (run_dir, outputs)
+        logger.info("done")
+        return (run_dir, outputs)
+    except Exception as exn:
+        logger.debug(traceback.format_exc())
+        wrapper = TaskFailure(task.name, task_id)
+        logger.error("{}: {}, {}".format(str(wrapper), exn.__class__.__name__, str(exn)))
+        raise wrapper from exn
 
 
 def _eval_task_inputs(
